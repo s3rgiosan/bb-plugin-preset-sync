@@ -8,6 +8,7 @@ import {
   isPortableMarketplaceSource,
   isSensitiveSettingKey,
   lastOperationSchema,
+  parseCatalogInstallSource,
   presetSnapshotSchema,
   sameJson,
   settingSafetyIssue,
@@ -54,6 +55,40 @@ function pluginInstallSpec(plugin: Awaited<ReturnType<BbPluginApi["sdk"]["plugin
     return `${plugin.catalogEntryId}@${plugin.catalogMarketplaceName}`;
   }
   return plugin.source;
+}
+
+export async function installPluginFromPreset(
+  bb: BbPluginApi,
+  source: string,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const catalogTarget = parseCatalogInstallSource(source);
+  if (catalogTarget === null) {
+    return bb.sdk.plugins.install({ source });
+  }
+
+  const plan = await bb.sdk.plugins.catalog.installPlan({
+    ...catalogTarget,
+    signal,
+  });
+  if (!plan.compatible) {
+    throw new Error(
+      plan.incompatibleReason ?? `Catalog plugin ${catalogTarget.entryId} is incompatible`,
+    );
+  }
+
+  if (plan.kind === "marketplace") {
+    const unresolvedReason = plan.resolvedSource.unresolvedReason;
+    if (unresolvedReason !== undefined) {
+      throw new Error(unresolvedReason);
+    }
+    return bb.sdk.plugins.catalog.install({
+      ...catalogTarget,
+      confirmedSource: plan.resolvedSource,
+    });
+  }
+
+  return bb.sdk.plugins.catalog.install(catalogTarget);
 }
 
 function settingValueMatchesDescriptor(
@@ -535,7 +570,7 @@ export class PresetSyncService {
           continue;
         }
         await attempt(`Installed plugin ${plugin.id}`, () =>
-          this.bb.sdk.plugins.install({ source: plugin.install }),
+          installPluginFromPreset(this.bb, plugin.install, signal),
         );
       }
 

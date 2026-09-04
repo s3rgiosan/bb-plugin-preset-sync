@@ -16,7 +16,7 @@ bb plugin install preset-sync@y5k --yes
 Or install the tagged release directly:
 
 ```bash
-bb plugin install git:https://github.com/imyeskela/bb-plugin-preset-sync.git@v0.2.1 --yes
+bb plugin install git:https://github.com/imyeskela/bb-plugin-preset-sync.git@v0.2.2 --yes
 ```
 
 ## First setup

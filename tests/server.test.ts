@@ -4,7 +4,7 @@ import {
   experimental_scanPublicSdkOnly,
 } from "@get-bb/plugin-sdk/testing";
 import plugin from "../server";
-import { backgroundIntervalMs } from "../lib/service";
+import { backgroundIntervalMs, installPluginFromPreset } from "../lib/service";
 
 function createHost() {
   return createFakePluginHost({
@@ -99,6 +99,79 @@ describe("plugin registration", () => {
     expect(backgroundIntervalMs("1 minute")).toBe(60_000);
     expect(backgroundIntervalMs("30 minutes")).toBe(30 * 60_000);
     expect(backgroundIntervalMs("unexpected")).toBe(5 * 60_000);
+  });
+
+  it("restores marketplace plugins through the catalog API", async () => {
+    const resolvedSource = {
+      kind: "git" as const,
+      url: "https://github.com/yusuf8834/bb-sidebar.git",
+      range: "^0.2.0",
+      resolvedCommit: "abc123",
+      resolvedTag: "v0.2.4",
+    };
+    const { bb, harness } = createFakePluginHost({
+      pluginId: "preset-sync",
+      sdk: {
+        plugins: {
+          install: async () => {
+            throw new Error("direct install must not handle catalog shorthand");
+          },
+          catalog: {
+            installPlan: async ({ entryId, marketplace }) => ({
+              kind: "marketplace",
+              entryId,
+              pluginId: entryId,
+              displayName: "BB Sidebar",
+              source: `${entryId}@${marketplace}`,
+              marketplace: marketplace ?? "bb-community",
+              marketplaceDisplayName: "BB Community",
+              official: true,
+              author: { name: "Test", url: null },
+              compatible: true,
+              incompatibleReason: null,
+              resolvedSource,
+            }),
+            install: async () => ({}) as never,
+          },
+        },
+      },
+    });
+
+    await installPluginFromPreset(bb, "bb-sidebar@bb-community");
+
+    expect(harness.inspection.sdk.callsTo("plugins.install")).toEqual([]);
+    expect(harness.inspection.sdk.callsTo("plugins.catalog.installPlan")[0]?.[0]).toEqual({
+      entryId: "bb-sidebar",
+      marketplace: "bb-community",
+      signal: undefined,
+    });
+    expect(harness.inspection.sdk.callsTo("plugins.catalog.install")[0]?.[0]).toEqual({
+      entryId: "bb-sidebar",
+      marketplace: "bb-community",
+      confirmedSource: resolvedSource,
+    });
+    await harness.lifecycle.dispose();
+  });
+
+  it("keeps direct Git sources on the direct install API", async () => {
+    const source = "git:https://github.com/example/plugin.git@main";
+    const { bb, harness } = createFakePluginHost({
+      pluginId: "preset-sync",
+      sdk: {
+        plugins: {
+          install: async () => ({}) as never,
+        },
+      },
+    });
+
+    await installPluginFromPreset(bb, source);
+
+    expect(harness.inspection.sdk.callsTo("plugins.install")[0]?.[0]).toEqual({
+      source,
+    });
+    expect(harness.inspection.sdk.callsTo("plugins.catalog.installPlan")).toEqual([]);
+    expect(harness.inspection.sdk.callsTo("plugins.catalog.install")).toEqual([]);
+    await harness.lifecycle.dispose();
   });
 
   it("explains how to configure a repository before remote operations", async () => {

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2
+
+- Restore `plugin@marketplace` entries through BB's catalog API instead of
+  treating them as machine-local package paths.
+- Confirm the resolved source from the catalog install plan before installing
+  third-party marketplace plugins.
+
 ## 0.2.1
 
 - Show directional `↓ remote` and `↑ local` change counts in the BB sidebar.

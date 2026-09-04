@@ -7,6 +7,7 @@ import {
   buildPushChanges,
   isPortableInstallSource,
   isSensitiveSettingKey,
+  parseCatalogInstallSource,
   readPresetSnapshot,
   samePresetConfiguration,
   writePresetSnapshot,
@@ -72,6 +73,16 @@ describe("preset safety", () => {
     expect(
       settingSafetyIssue("options", JSON.stringify({ apiToken: "should-not-leak" })),
     ).toBe("credential-like data");
+    expect(parseCatalogInstallSource("bb-sidebar@bb-community")).toEqual({
+      entryId: "bb-sidebar",
+      marketplace: "bb-community",
+    });
+    expect(parseCatalogInstallSource("bb-sidebar")).toEqual({
+      entryId: "bb-sidebar",
+    });
+    expect(
+      parseCatalogInstallSource("git:https://github.com/example/plugin.git@main"),
+    ).toBeNull();
   });
 
   it("flags plugin installs as full-trust and never plans removal of extras", () => {

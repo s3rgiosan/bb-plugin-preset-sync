@@ -19250,11 +19250,20 @@ function settingSafetyIssue(key, value) {
   if (isSensitiveSettingKey(key)) return "credential-like key";
   return inspectSettingValue(value);
 }
+function parseCatalogInstallSource(source) {
+  const match = /^([a-z0-9][a-z0-9._-]*)(?:@([a-z0-9][a-z0-9-]*))?$/i.exec(
+    source.trim()
+  );
+  if (match === null) return null;
+  const entryId = match[1];
+  const marketplace = match[2];
+  return marketplace === void 0 ? { entryId } : { entryId, marketplace };
+}
 function isPortableInstallSource(source) {
   const normalized = source.trim();
   return /^builtin:[a-z0-9][a-z0-9._-]*$/i.test(normalized) || /^npm:(?:@?[a-z0-9][a-z0-9._/-]*)(?:@[^\s]+)?$/i.test(normalized) || /^https:\/\/[^\s]+$/i.test(normalized) || /^ssh:\/\/[^\s]+$/i.test(normalized) || /^git@[^\s:]+:[^\s]+$/i.test(normalized) || /^git:(?:https?:\/\/|ssh:\/\/|git@[^\s:]+:|[a-z0-9.-]+[:/])[^\s]+$/i.test(
     normalized
-  ) || /^[a-z0-9][a-z0-9._-]*(?:@[a-z0-9][a-z0-9._-]*)?$/i.test(normalized);
+  ) || parseCatalogInstallSource(normalized) !== null;
 }
 function isPortableMarketplaceSource(source) {
   const normalized = source.trim();
@@ -19796,6 +19805,32 @@ function pluginInstallSpec(plugin2) {
   }
   return plugin2.source;
 }
+async function installPluginFromPreset(bb, source, signal) {
+  const catalogTarget = parseCatalogInstallSource(source);
+  if (catalogTarget === null) {
+    return bb.sdk.plugins.install({ source });
+  }
+  const plan = await bb.sdk.plugins.catalog.installPlan({
+    ...catalogTarget,
+    signal
+  });
+  if (!plan.compatible) {
+    throw new Error(
+      plan.incompatibleReason ?? `Catalog plugin ${catalogTarget.entryId} is incompatible`
+    );
+  }
+  if (plan.kind === "marketplace") {
+    const unresolvedReason = plan.resolvedSource.unresolvedReason;
+    if (unresolvedReason !== void 0) {
+      throw new Error(unresolvedReason);
+    }
+    return bb.sdk.plugins.catalog.install({
+      ...catalogTarget,
+      confirmedSource: plan.resolvedSource
+    });
+  }
+  return bb.sdk.plugins.catalog.install(catalogTarget);
+}
 function settingValueMatchesDescriptor(descriptor, value) {
   if (descriptor.type === "boolean") return typeof value === "boolean";
   if (typeof value !== "string") return false;
@@ -20223,7 +20258,7 @@ var PresetSyncService = class {
         }
         await attempt(
           `Installed plugin ${plugin2.id}`,
-          () => this.bb.sdk.plugins.install({ source: plugin2.install })
+          () => installPluginFromPreset(this.bb, plugin2.install, signal)
         );
       }
       pluginList = await this.bb.sdk.plugins.list({ signal });

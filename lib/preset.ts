@@ -500,6 +500,18 @@ export function settingSafetyIssue(
   return inspectSettingValue(value);
 }
 
+export function parseCatalogInstallSource(
+  source: string,
+): { entryId: string; marketplace?: string } | null {
+  const match = /^([a-z0-9][a-z0-9._-]*)(?:@([a-z0-9][a-z0-9-]*))?$/i.exec(
+    source.trim(),
+  );
+  if (match === null) return null;
+  const entryId = match[1]!;
+  const marketplace = match[2];
+  return marketplace === undefined ? { entryId } : { entryId, marketplace };
+}
+
 export function isPortableInstallSource(source: string): boolean {
   const normalized = source.trim();
   return (
@@ -511,7 +523,7 @@ export function isPortableInstallSource(source: string): boolean {
     /^git:(?:https?:\/\/|ssh:\/\/|git@[^\s:]+:|[a-z0-9.-]+[:/])[^\s]+$/i.test(
       normalized,
     ) ||
-    /^[a-z0-9][a-z0-9._-]*(?:@[a-z0-9][a-z0-9._-]*)?$/i.test(normalized)
+    parseCatalogInstallSource(normalized) !== null
   );
 }
 
