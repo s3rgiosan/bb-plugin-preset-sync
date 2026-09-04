@@ -18955,9 +18955,10 @@ var planChangeSchema = external_exports.object({
     "general-settings",
     "experiments",
     "keybindings",
-    "appearance"
+    "appearance",
+    "metadata"
   ]),
-  action: external_exports.enum(["add", "install", "enable", "disable", "update"]),
+  action: external_exports.enum(["add", "remove", "install", "enable", "disable", "update"]),
   target: external_exports.string(),
   summary: external_exports.string(),
   risk: external_exports.enum(["configuration", "full-trust"])
@@ -18977,14 +18978,24 @@ var lastOperationSchema = external_exports.object({
   summary: external_exports.string()
 }).strict();
 var syncStatusSchema = external_exports.object({
+  checkedAt: external_exports.string(),
   repository: external_exports.string(),
   branch: external_exports.string(),
   remoteHead: external_exports.string(),
   remoteCapturedAt: external_exports.string(),
+  localCapturedAt: external_exports.string(),
   stagedAt: external_exports.string().nullable(),
   changeCount: external_exports.number().int().nonnegative(),
+  pushChangeCount: external_exports.number().int().nonnegative(),
+  pullChanges: external_exports.array(planChangeSchema),
+  pushChanges: external_exports.array(planChangeSchema),
   warnings: external_exports.array(external_exports.string()),
   lastOperation: lastOperationSchema.nullable()
+}).strict();
+var cachedSyncCheckSchema = external_exports.object({
+  checkedAt: external_exports.string(),
+  status: syncStatusSchema.nullable(),
+  error: external_exports.string().nullable()
 }).strict();
 var captureResultSchema = external_exports.object({
   capturedAt: external_exports.string(),
@@ -19403,6 +19414,179 @@ function buildPullPlan(args) {
     warnings: [...new Set(warnings)]
   });
 }
+function sortedKeys(left, right) {
+  return [.../* @__PURE__ */ new Set([...left.keys(), ...right.keys()])].sort(
+    (a, b) => a.localeCompare(b)
+  );
+}
+function buildPushChanges(localSnapshot, remoteSnapshot) {
+  const local = sortSnapshot(localSnapshot);
+  const remote = sortSnapshot(remoteSnapshot);
+  const changes = [];
+  const localMarketplaces = new Map(
+    local.marketplaces.map((entry) => [entry.name, entry])
+  );
+  const remoteMarketplaces = new Map(
+    remote.marketplaces.map((entry) => [entry.name, entry])
+  );
+  for (const name of sortedKeys(localMarketplaces, remoteMarketplaces)) {
+    const next = localMarketplaces.get(name);
+    const current = remoteMarketplaces.get(name);
+    if (next !== void 0 && current === void 0) {
+      changes.push({
+        kind: "marketplace",
+        action: "add",
+        target: name,
+        summary: `Add marketplace ${name} to the preset`,
+        risk: "configuration"
+      });
+    } else if (next === void 0 && current !== void 0) {
+      changes.push({
+        kind: "marketplace",
+        action: "remove",
+        target: name,
+        summary: `Remove marketplace ${name} from the preset`,
+        risk: "configuration"
+      });
+    } else if (next !== void 0 && current !== void 0 && next.source !== current.source) {
+      changes.push({
+        kind: "marketplace",
+        action: "update",
+        target: name,
+        summary: `Update marketplace ${name} source in the preset`,
+        risk: "configuration"
+      });
+    }
+  }
+  const localPlugins = new Map(local.plugins.map((entry) => [entry.id, entry]));
+  const remotePlugins = new Map(remote.plugins.map((entry) => [entry.id, entry]));
+  for (const id of sortedKeys(localPlugins, remotePlugins)) {
+    const next = localPlugins.get(id);
+    const current = remotePlugins.get(id);
+    if (next !== void 0 && current === void 0) {
+      changes.push({
+        kind: "plugin-install",
+        action: "add",
+        target: id,
+        summary: `Add plugin ${id} to the preset`,
+        risk: "full-trust"
+      });
+      continue;
+    }
+    if (next === void 0 && current !== void 0) {
+      changes.push({
+        kind: "plugin-install",
+        action: "remove",
+        target: id,
+        summary: `Remove plugin ${id} from the preset`,
+        risk: "configuration"
+      });
+      continue;
+    }
+    if (next === void 0 || current === void 0) continue;
+    if (next.install !== current.install) {
+      changes.push({
+        kind: "plugin-install",
+        action: "update",
+        target: id,
+        summary: `Update plugin ${id} source in the preset`,
+        risk: "full-trust"
+      });
+    }
+    if (next.enabled !== current.enabled) {
+      changes.push({
+        kind: "plugin-state",
+        action: next.enabled ? "enable" : "disable",
+        target: id,
+        summary: `Record plugin ${id} as ${next.enabled ? "enabled" : "disabled"}`,
+        risk: "configuration"
+      });
+    }
+  }
+  const localSettings = new Map(
+    local.pluginSettings.map((entry) => [
+      `${entry.id}\0${entry.key}`,
+      entry
+    ])
+  );
+  const remoteSettings = new Map(
+    remote.pluginSettings.map((entry) => [
+      `${entry.id}\0${entry.key}`,
+      entry
+    ])
+  );
+  const changedSettingsByPlugin = /* @__PURE__ */ new Map();
+  for (const key of sortedKeys(localSettings, remoteSettings)) {
+    const next = localSettings.get(key);
+    const current = remoteSettings.get(key);
+    if (!sameJson(next?.value, current?.value)) {
+      const pluginId = (next ?? current)?.id;
+      if (pluginId !== void 0) {
+        changedSettingsByPlugin.set(
+          pluginId,
+          (changedSettingsByPlugin.get(pluginId) ?? 0) + 1
+        );
+      }
+    }
+  }
+  for (const [pluginId, count] of [...changedSettingsByPlugin].sort(
+    ([left], [right]) => left.localeCompare(right)
+  )) {
+    changes.push({
+      kind: "plugin-settings",
+      action: "update",
+      target: pluginId,
+      summary: `Update ${count} captured ${plural(count, "setting", "settings")} for ${pluginId}`,
+      risk: "configuration"
+    });
+  }
+  if (!sameJson(local.settings.generalSettings, remote.settings.generalSettings)) {
+    changes.push({
+      kind: "general-settings",
+      action: "update",
+      target: "BB general settings",
+      summary: "Update BB general settings in the preset",
+      risk: "configuration"
+    });
+  }
+  if (!sameJson(local.settings.experiments, remote.settings.experiments)) {
+    changes.push({
+      kind: "experiments",
+      action: "update",
+      target: "BB experiments",
+      summary: "Update BB experiment flags in the preset",
+      risk: "configuration"
+    });
+  }
+  if (!sameJson(local.settings.keybindingOverrides, remote.settings.keybindingOverrides)) {
+    changes.push({
+      kind: "keybindings",
+      action: "update",
+      target: "Keyboard shortcuts",
+      summary: "Update keyboard shortcut overrides in the preset",
+      risk: "configuration"
+    });
+  }
+  if (!sameJson(local.settings.appearance, remote.settings.appearance)) {
+    changes.push({
+      kind: "appearance",
+      action: "update",
+      target: "Theme",
+      summary: `Record theme ${local.settings.appearance.themeId} in the preset`,
+      risk: "configuration"
+    });
+  }
+  if (local.bbVersion !== remote.bbVersion) {
+    changes.push({
+      kind: "metadata",
+      action: "update",
+      target: "BB version",
+      summary: `Record BB ${local.bbVersion} in preset metadata`,
+      risk: "configuration"
+    });
+  }
+  return changes.map((change) => planChangeSchema.parse(change));
+}
 function errorMessage(cause) {
   return cause instanceof Error ? cause.message : String(cause);
 }
@@ -19601,7 +19785,10 @@ async function pushRemotePreset(options, snapshot) {
 // lib/service.ts
 var STAGED_KEY = "staged-preset-v1";
 var LAST_OPERATION_KEY = "last-operation-v1";
+var CACHED_CHECK_KEY = "cached-check-v1";
 var MAX_STAGED_BYTES = 240 * 1024;
+var DEFAULT_BACKGROUND_INTERVAL_MS = 5 * 60 * 1e3;
+var ALLOWED_BACKGROUND_INTERVALS = /* @__PURE__ */ new Set([1, 5, 10, 15, 30, 60]);
 function pluginInstallSpec(plugin2) {
   if (plugin2.source.startsWith("builtin:")) return plugin2.source;
   if (plugin2.catalogEntryId !== void 0 && plugin2.catalogMarketplaceName !== void 0) {
@@ -19618,6 +19805,32 @@ function settingValueMatchesDescriptor(descriptor, value) {
 function unique(values) {
   return [...new Set(values)];
 }
+function backgroundIntervalMs(value) {
+  if (value === "Off") return null;
+  const minutes = Number.parseInt(value, 10);
+  return ALLOWED_BACKGROUND_INTERVALS.has(minutes) ? minutes * 60 * 1e3 : DEFAULT_BACKGROUND_INTERVAL_MS;
+}
+function cachedCheckFingerprint(check2) {
+  if (check2 === null) return null;
+  if (check2.error !== null) return { error: check2.error };
+  const status = check2.status;
+  if (status === null) return { error: null, status: null };
+  return {
+    error: null,
+    status: {
+      repository: status.repository,
+      branch: status.branch,
+      remoteHead: status.remoteHead,
+      remoteCapturedAt: status.remoteCapturedAt,
+      stagedAt: status.stagedAt,
+      changeCount: status.changeCount,
+      pushChangeCount: status.pushChangeCount,
+      pullChanges: status.pullChanges,
+      pushChanges: status.pushChanges,
+      warnings: status.warnings
+    }
+  };
+}
 var PresetSyncService = class {
   constructor(bb, getSettings) {
     this.bb = bb;
@@ -19626,6 +19839,8 @@ var PresetSyncService = class {
   bb;
   getSettings;
   operationTail = Promise.resolve();
+  backgroundWake = null;
+  backgroundWakePending = false;
   exclusive(operation) {
     const result = this.operationTail.then(operation, operation);
     this.operationTail = result.then(
@@ -19648,6 +19863,24 @@ var PresetSyncService = class {
     if (value === void 0) return null;
     const parsed = lastOperationSchema.safeParse(value);
     return parsed.success ? parsed.data : null;
+  }
+  async cachedCheck() {
+    const value = await this.bb.storage.kv.get(CACHED_CHECK_KEY);
+    if (value === void 0) return null;
+    const parsed = cachedSyncCheckSchema.safeParse(value);
+    return parsed.success ? parsed.data : null;
+  }
+  async writeCachedCheck(check2) {
+    const previous = await this.cachedCheck();
+    await this.bb.storage.kv.set(CACHED_CHECK_KEY, check2);
+    if (!sameJson(cachedCheckFingerprint(previous), cachedCheckFingerprint(check2))) {
+      this.bb.realtime.publish("preset-sync-state", {
+        checkedAt: check2.checkedAt,
+        hasError: check2.error !== null,
+        pullCount: check2.status?.changeCount ?? 0,
+        pushCount: check2.status?.pushChangeCount ?? 0
+      });
+    }
   }
   async writeLastOperation(operation) {
     await this.bb.storage.kv.set(LAST_OPERATION_KEY, operation);
@@ -19787,17 +20020,84 @@ var PresetSyncService = class {
         this.readStaged(),
         this.readLastOperation()
       ]);
-      return {
+      const pushChanges = buildPushChanges(local.snapshot, remote.snapshot);
+      const checkedAt = (/* @__PURE__ */ new Date()).toISOString();
+      const status = {
+        checkedAt,
         repository: settings.repositoryUrl,
         branch: settings.branch,
         remoteHead: remote.head,
         remoteCapturedAt: remote.snapshot.capturedAt,
+        localCapturedAt: local.snapshot.capturedAt,
         stagedAt: staged?.stagedAt ?? null,
         changeCount: plan.changes.length,
+        pushChangeCount: pushChanges.length,
+        pullChanges: plan.changes,
+        pushChanges,
         warnings: plan.warnings,
         lastOperation
       };
+      await this.writeCachedCheck({ checkedAt, status, error: null });
+      return status;
     });
+  }
+  async checkInBackground(signal) {
+    try {
+      await this.status(signal);
+    } catch (cause) {
+      if (signal?.aborted) return;
+      const checkedAt = (/* @__PURE__ */ new Date()).toISOString();
+      const previous = await this.cachedCheck();
+      const error61 = errorMessage(cause);
+      await this.writeCachedCheck({
+        checkedAt,
+        status: previous?.status ?? null,
+        error: error61
+      });
+      if (previous?.error !== error61) {
+        this.bb.log.warn(`Background check failed: ${error61}`);
+      }
+    }
+  }
+  wakeBackgroundCheck() {
+    if (this.backgroundWake !== null) {
+      this.backgroundWake();
+    } else {
+      this.backgroundWakePending = true;
+    }
+  }
+  waitForBackgroundWake(signal, delayMs) {
+    if (signal.aborted) return Promise.resolve();
+    if (this.backgroundWakePending) {
+      this.backgroundWakePending = false;
+      return Promise.resolve();
+    }
+    return new Promise((resolve2) => {
+      let timer;
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (timer !== void 0) clearTimeout(timer);
+        signal.removeEventListener("abort", finish);
+        if (this.backgroundWake === finish) this.backgroundWake = null;
+        resolve2();
+      };
+      this.backgroundWake = finish;
+      signal.addEventListener("abort", finish, { once: true });
+      if (delayMs !== null) timer = setTimeout(finish, delayMs);
+    });
+  }
+  async runBackgroundChecks(signal) {
+    while (!signal.aborted) {
+      const settings = await this.getSettings();
+      const delayMs = backgroundIntervalMs(settings.backgroundCheckInterval);
+      if (delayMs !== null && settings.repositoryUrl.trim() !== "") {
+        await this.checkInBackground(signal);
+      }
+      if (signal.aborted) return;
+      await this.waitForBackgroundWake(signal, delayMs);
+    }
   }
   async capture() {
     return this.exclusive(async () => {
@@ -20044,6 +20344,10 @@ var rpcContract = defineRpcContract({
     input: external_exports.null(),
     output: syncStatusSchema
   },
+  sync_cached_check: {
+    input: external_exports.null(),
+    output: cachedSyncCheckSchema.nullable()
+  },
   sync_preview: {
     input: external_exports.null(),
     output: syncPlanSchema
@@ -20128,6 +20432,13 @@ async function plugin(bb) {
       label: "Capture non-secret plugin settings",
       description: "Secret descriptors and suspicious credential-like keys are always excluded.",
       default: true
+    },
+    backgroundCheckInterval: {
+      type: "select",
+      label: "Background check interval",
+      description: "How often to compare this BB installation with the Git preset. Select Off to disable background checks.",
+      options: ["Off", "1 minute", "5 minutes", "10 minutes", "15 minutes", "30 minutes", "60 minutes"],
+      default: "5 minutes"
     }
   });
   const service = new PresetSyncService(bb, async () => {
@@ -20138,15 +20449,21 @@ async function plugin(bb) {
       githubToken: value.githubToken,
       gitAuthorName: value.gitAuthorName,
       gitAuthorEmail: value.gitAuthorEmail,
-      includePluginSettings: value.includePluginSettings
+      includePluginSettings: value.includePluginSettings,
+      backgroundCheckInterval: value.backgroundCheckInterval
     };
   });
+  settings.onChange(() => service.wakeBackgroundCheck());
   bb.rpc.register(rpcContract, {
     sync_status: () => service.status(),
+    sync_cached_check: () => service.cachedCheck(),
     sync_preview: () => service.preview(),
     sync_capture: () => service.capture(),
     sync_push: ({ fresh, message }) => service.push({ fresh, message }),
     sync_pull: () => service.pullAndApply()
+  });
+  bb.background.service("change-check", {
+    start: (signal) => service.runBackgroundChecks(signal)
   });
   bb.cli.register({
     name: "preset",
@@ -20196,6 +20513,8 @@ async function plugin(bb) {
               `Repository: ${status.repository}#${status.branch}`,
               `Remote: ${status.remoteHead.slice(0, 12)} (captured ${status.remoteCapturedAt})`,
               `Pending pull changes: ${status.changeCount}`,
+              `Pending push changes: ${status.pushChangeCount}`,
+              `Checked: ${status.checkedAt}`,
               `Staged capture: ${status.stagedAt ?? "none"}`
             ];
             if (status.lastOperation !== null) {

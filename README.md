@@ -16,7 +16,7 @@ bb plugin install preset-sync@y5k --yes
 Or install the tagged release directly:
 
 ```bash
-bb plugin install git:https://github.com/imyeskela/bb-plugin-preset-sync.git@v0.2.0 --yes
+bb plugin install git:https://github.com/imyeskela/bb-plugin-preset-sync.git@v0.2.1 --yes
 ```
 
 ## First setup
@@ -55,6 +55,16 @@ bb preset pull --yes
 
 `pull` without `--yes` only prints a preview and changes nothing. Pull is
 additive: locally installed plugins that are absent from the preset are kept.
+
+The sidebar indicator stays hidden while the local and remote presets match.
+When they differ it shows `↓` for changes available from the remote preset and
+`↑` for local changes available to push. Open Preset Sync to review every
+change and choose a direction.
+
+Background comparisons run every five minutes by default. Change
+**Background check interval** under **Settings → Plugins → Preset Sync** to
+`Off`, 1, 5, 10, 15, 30, or 60 minutes. A background check never pulls or
+pushes automatically.
 
 ## Commands
 

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildPullPlan,
+  buildPushChanges,
   isPortableInstallSource,
   isSensitiveSettingKey,
   readPresetSnapshot,
@@ -98,6 +99,42 @@ describe("preset safety", () => {
     expect(plan.changes.some((change) => change.action === "disable")).toBe(false);
     expect(plan.warnings).toContain(
       "Local plugin local-only is not in the preset and will be kept installed.",
+    );
+  });
+
+  it("describes the exact preset changes available in the push direction", () => {
+    const local = snapshot({
+      plugins: [{ id: "local-only", install: "builtin:local-only", enabled: true }],
+      settings: {
+        ...snapshot().settings,
+        appearance: { themeId: "dark", faviconColor: "default" },
+      },
+    });
+    const remote = snapshot({
+      plugins: [{ id: "remote-only", install: "builtin:remote-only", enabled: true }],
+    });
+
+    const changes = buildPushChanges(local, remote);
+
+    expect(changes).toContainEqual(
+      expect.objectContaining({
+        action: "add",
+        target: "local-only",
+        summary: "Add plugin local-only to the preset",
+      }),
+    );
+    expect(changes).toContainEqual(
+      expect.objectContaining({
+        action: "remove",
+        target: "remote-only",
+        summary: "Remove plugin remote-only from the preset",
+      }),
+    );
+    expect(changes).toContainEqual(
+      expect.objectContaining({
+        kind: "appearance",
+        summary: "Record theme dark in the preset",
+      }),
     );
   });
 

@@ -2,6 +2,7 @@ import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
   applyResultSchema,
+  cachedSyncCheckSchema,
   captureResultSchema,
   errorMessage,
   pushResultSchema,
@@ -15,6 +16,10 @@ export const rpcContract = defineRpcContract({
   sync_status: {
     input: z.null(),
     output: syncStatusSchema,
+  },
+  sync_cached_check: {
+    input: z.null(),
+    output: cachedSyncCheckSchema.nullable(),
   },
   sync_preview: {
     input: z.null(),
@@ -109,6 +114,14 @@ export default async function plugin(bb: BbPluginApi) {
         "Secret descriptors and suspicious credential-like keys are always excluded.",
       default: true,
     },
+    backgroundCheckInterval: {
+      type: "select",
+      label: "Background check interval",
+      description:
+        "How often to compare this BB installation with the Git preset. Select Off to disable background checks.",
+      options: ["Off", "1 minute", "5 minutes", "10 minutes", "15 minutes", "30 minutes", "60 minutes"],
+      default: "5 minutes",
+    },
   });
 
   const service = new PresetSyncService(bb, async () => {
@@ -120,15 +133,23 @@ export default async function plugin(bb: BbPluginApi) {
       gitAuthorName: value.gitAuthorName,
       gitAuthorEmail: value.gitAuthorEmail,
       includePluginSettings: value.includePluginSettings,
+      backgroundCheckInterval: value.backgroundCheckInterval,
     };
   });
 
+  settings.onChange(() => service.wakeBackgroundCheck());
+
   bb.rpc.register(rpcContract, {
     sync_status: () => service.status(),
+    sync_cached_check: () => service.cachedCheck(),
     sync_preview: () => service.preview(),
     sync_capture: () => service.capture(),
     sync_push: ({ fresh, message }) => service.push({ fresh, message }),
     sync_pull: () => service.pullAndApply(),
+  });
+
+  bb.background.service("change-check", {
+    start: (signal) => service.runBackgroundChecks(signal),
   });
 
   bb.cli.register({
@@ -179,6 +200,8 @@ export default async function plugin(bb: BbPluginApi) {
               `Repository: ${status.repository}#${status.branch}`,
               `Remote: ${status.remoteHead.slice(0, 12)} (captured ${status.remoteCapturedAt})`,
               `Pending pull changes: ${status.changeCount}`,
+              `Pending push changes: ${status.pushChangeCount}`,
+              `Checked: ${status.checkedAt}`,
               `Staged capture: ${status.stagedAt ?? "none"}`,
             ];
             if (status.lastOperation !== null) {

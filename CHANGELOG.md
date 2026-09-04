@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1
+
+- Show directional `↓ remote` and `↑ local` change counts in the BB sidebar.
+- List the exact pull and push changes with explicit actions on the Preset Sync page.
+- Add a configurable background comparison interval from one to sixty minutes,
+  including an Off option.
+- Keep the background indicator silent while the preset is fully synchronized.
+
 ## 0.2.0
 
 - Publish a generic configuration with no user-specific repository default.

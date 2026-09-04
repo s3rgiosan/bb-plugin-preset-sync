@@ -4,6 +4,7 @@ import {
   experimental_scanPublicSdkOnly,
 } from "@get-bb/plugin-sdk/testing";
 import plugin from "../server";
+import { backgroundIntervalMs } from "../lib/service";
 
 function createHost() {
   return createFakePluginHost({
@@ -67,6 +68,18 @@ describe("plugin registration", () => {
     expect(
       harness.inspection.registrations.settingsDescriptors.repositoryUrl,
     ).not.toHaveProperty("default");
+    expect(
+      harness.inspection.registrations.settingsDescriptors.backgroundCheckInterval,
+    ).toEqual(
+      expect.objectContaining({
+        type: "select",
+        default: "5 minutes",
+      }),
+    );
+    expect(harness.inspection.registrations.services.map((service) => service.name)).toEqual([
+      "change-check",
+    ]);
+    await expect(harness.behavior.callRpc("sync_cached_check", null)).resolves.toBeNull();
 
     const result = await harness.behavior.runCli(["capture", "--json"]);
     expect(result.exitCode).toBe(0);
@@ -79,6 +92,13 @@ describe("plugin registration", () => {
     );
 
     await harness.lifecycle.dispose();
+  });
+
+  it("parses the supported background check intervals", () => {
+    expect(backgroundIntervalMs("Off")).toBeNull();
+    expect(backgroundIntervalMs("1 minute")).toBe(60_000);
+    expect(backgroundIntervalMs("30 minutes")).toBe(30 * 60_000);
+    expect(backgroundIntervalMs("unexpected")).toBe(5 * 60_000);
   });
 
   it("explains how to configure a repository before remote operations", async () => {

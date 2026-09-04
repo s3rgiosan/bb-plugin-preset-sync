@@ -1,6 +1,8 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import {
   buildPullPlan,
+  buildPushChanges,
+  cachedSyncCheckSchema,
   errorMessage,
   isPortableInstallSource,
   isPortableMarketplaceSource,
@@ -11,6 +13,7 @@ import {
   settingSafetyIssue,
   SELF_PLUGIN_ID,
   type LastOperation,
+  type CachedSyncCheck,
   type PluginSettingPresetEntry,
   type PresetSnapshot,
   type SyncPlan,
@@ -24,6 +27,7 @@ export interface SyncSettings {
   gitAuthorName: string;
   gitAuthorEmail: string;
   includePluginSettings: boolean;
+  backgroundCheckInterval: string;
 }
 
 interface CapturedPreset {
@@ -37,7 +41,10 @@ interface StagedPreset extends CapturedPreset {
 
 const STAGED_KEY = "staged-preset-v1";
 const LAST_OPERATION_KEY = "last-operation-v1";
+const CACHED_CHECK_KEY = "cached-check-v1";
 const MAX_STAGED_BYTES = 240 * 1024;
+const DEFAULT_BACKGROUND_INTERVAL_MS = 5 * 60 * 1_000;
+const ALLOWED_BACKGROUND_INTERVALS = new Set([1, 5, 10, 15, 30, 60]);
 
 type SystemConfig = Awaited<ReturnType<BbPluginApi["sdk"]["system"]["config"]>>;
 
@@ -63,8 +70,40 @@ function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
 
+export function backgroundIntervalMs(value: string): number | null {
+  if (value === "Off") return null;
+  const minutes = Number.parseInt(value, 10);
+  return ALLOWED_BACKGROUND_INTERVALS.has(minutes)
+    ? minutes * 60 * 1_000
+    : DEFAULT_BACKGROUND_INTERVAL_MS;
+}
+
+function cachedCheckFingerprint(check: CachedSyncCheck | null): unknown {
+  if (check === null) return null;
+  if (check.error !== null) return { error: check.error };
+  const status = check.status;
+  if (status === null) return { error: null, status: null };
+  return {
+    error: null,
+    status: {
+      repository: status.repository,
+      branch: status.branch,
+      remoteHead: status.remoteHead,
+      remoteCapturedAt: status.remoteCapturedAt,
+      stagedAt: status.stagedAt,
+      changeCount: status.changeCount,
+      pushChangeCount: status.pushChangeCount,
+      pullChanges: status.pullChanges,
+      pushChanges: status.pushChanges,
+      warnings: status.warnings,
+    },
+  };
+}
+
 export class PresetSyncService {
   private operationTail: Promise<void> = Promise.resolve();
+  private backgroundWake: (() => void) | null = null;
+  private backgroundWakePending = false;
 
   constructor(
     private readonly bb: BbPluginApi,
@@ -95,6 +134,26 @@ export class PresetSyncService {
     if (value === undefined) return null;
     const parsed = lastOperationSchema.safeParse(value);
     return parsed.success ? parsed.data : null;
+  }
+
+  async cachedCheck(): Promise<CachedSyncCheck | null> {
+    const value = await this.bb.storage.kv.get<unknown>(CACHED_CHECK_KEY);
+    if (value === undefined) return null;
+    const parsed = cachedSyncCheckSchema.safeParse(value);
+    return parsed.success ? parsed.data : null;
+  }
+
+  private async writeCachedCheck(check: CachedSyncCheck): Promise<void> {
+    const previous = await this.cachedCheck();
+    await this.bb.storage.kv.set(CACHED_CHECK_KEY, check);
+    if (!sameJson(cachedCheckFingerprint(previous), cachedCheckFingerprint(check))) {
+      this.bb.realtime.publish("preset-sync-state", {
+        checkedAt: check.checkedAt,
+        hasError: check.error !== null,
+        pullCount: check.status?.changeCount ?? 0,
+        pushCount: check.status?.pushChangeCount ?? 0,
+      });
+    }
   }
 
   private async writeLastOperation(operation: LastOperation): Promise<void> {
@@ -260,17 +319,91 @@ export class PresetSyncService {
         this.readStaged(),
         this.readLastOperation(),
       ]);
-      return {
+      const pushChanges = buildPushChanges(local.snapshot, remote.snapshot);
+      const checkedAt = new Date().toISOString();
+      const status = {
+        checkedAt,
         repository: settings.repositoryUrl,
         branch: settings.branch,
         remoteHead: remote.head,
         remoteCapturedAt: remote.snapshot.capturedAt,
+        localCapturedAt: local.snapshot.capturedAt,
         stagedAt: staged?.stagedAt ?? null,
         changeCount: plan.changes.length,
+        pushChangeCount: pushChanges.length,
+        pullChanges: plan.changes,
+        pushChanges,
         warnings: plan.warnings,
         lastOperation,
       };
+      await this.writeCachedCheck({ checkedAt, status, error: null });
+      return status;
     });
+  }
+
+  async checkInBackground(signal?: AbortSignal): Promise<void> {
+    try {
+      await this.status(signal);
+    } catch (cause) {
+      if (signal?.aborted) return;
+      const checkedAt = new Date().toISOString();
+      const previous = await this.cachedCheck();
+      const error = errorMessage(cause);
+      await this.writeCachedCheck({
+        checkedAt,
+        status: previous?.status ?? null,
+        error,
+      });
+      if (previous?.error !== error) {
+        this.bb.log.warn(`Background check failed: ${error}`);
+      }
+    }
+  }
+
+  wakeBackgroundCheck(): void {
+    if (this.backgroundWake !== null) {
+      this.backgroundWake();
+    } else {
+      this.backgroundWakePending = true;
+    }
+  }
+
+  private waitForBackgroundWake(
+    signal: AbortSignal,
+    delayMs: number | null,
+  ): Promise<void> {
+    if (signal.aborted) return Promise.resolve();
+    if (this.backgroundWakePending) {
+      this.backgroundWakePending = false;
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (timer !== undefined) clearTimeout(timer);
+        signal.removeEventListener("abort", finish);
+        if (this.backgroundWake === finish) this.backgroundWake = null;
+        resolve();
+      };
+      this.backgroundWake = finish;
+      signal.addEventListener("abort", finish, { once: true });
+      if (delayMs !== null) timer = setTimeout(finish, delayMs);
+    });
+  }
+
+  async runBackgroundChecks(signal: AbortSignal): Promise<void> {
+    while (!signal.aborted) {
+      const settings = await this.getSettings();
+      const delayMs = backgroundIntervalMs(settings.backgroundCheckInterval);
+      if (delayMs !== null && settings.repositoryUrl.trim() !== "") {
+        await this.checkInBackground(signal);
+      }
+      if (signal.aborted) return;
+      await this.waitForBackgroundWake(signal, delayMs);
+    }
   }
 
   async capture() {

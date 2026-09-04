@@ -110,8 +110,9 @@ export const planChangeSchema = z
       "experiments",
       "keybindings",
       "appearance",
+      "metadata",
     ]),
-    action: z.enum(["add", "install", "enable", "disable", "update"]),
+    action: z.enum(["add", "remove", "install", "enable", "disable", "update"]),
     target: z.string(),
     summary: z.string(),
     risk: z.enum(["configuration", "full-trust"]),
@@ -145,14 +146,27 @@ export type LastOperation = z.infer<typeof lastOperationSchema>;
 
 export const syncStatusSchema = z
   .object({
+    checkedAt: z.string(),
     repository: z.string(),
     branch: z.string(),
     remoteHead: z.string(),
     remoteCapturedAt: z.string(),
+    localCapturedAt: z.string(),
     stagedAt: z.string().nullable(),
     changeCount: z.number().int().nonnegative(),
+    pushChangeCount: z.number().int().nonnegative(),
+    pullChanges: z.array(planChangeSchema),
+    pushChanges: z.array(planChangeSchema),
     warnings: z.array(z.string()),
     lastOperation: lastOperationSchema.nullable(),
+  })
+  .strict();
+
+export const cachedSyncCheckSchema = z
+  .object({
+    checkedAt: z.string(),
+    status: syncStatusSchema.nullable(),
+    error: z.string().nullable(),
   })
   .strict();
 
@@ -188,6 +202,7 @@ export const applyResultSchema = z
   .strict();
 
 export type SyncStatus = z.infer<typeof syncStatusSchema>;
+export type CachedSyncCheck = z.infer<typeof cachedSyncCheckSchema>;
 export type CaptureResult = z.infer<typeof captureResultSchema>;
 export type PushResult = z.infer<typeof pushResultSchema>;
 export type ApplyResult = z.infer<typeof applyResultSchema>;
@@ -678,6 +693,190 @@ export function buildPullPlan(args: {
     changes,
     warnings: [...new Set(warnings)],
   });
+}
+
+function sortedKeys<T>(left: Map<string, T>, right: Map<string, T>): string[] {
+  return [...new Set([...left.keys(), ...right.keys()])].sort((a, b) =>
+    a.localeCompare(b),
+  );
+}
+
+/** Describe what a fresh push would change in the managed Git preset. */
+export function buildPushChanges(
+  localSnapshot: PresetSnapshot,
+  remoteSnapshot: PresetSnapshot,
+): PlanChange[] {
+  const local = sortSnapshot(localSnapshot);
+  const remote = sortSnapshot(remoteSnapshot);
+  const changes: PlanChange[] = [];
+
+  const localMarketplaces = new Map(
+    local.marketplaces.map((entry) => [entry.name, entry]),
+  );
+  const remoteMarketplaces = new Map(
+    remote.marketplaces.map((entry) => [entry.name, entry]),
+  );
+  for (const name of sortedKeys(localMarketplaces, remoteMarketplaces)) {
+    const next = localMarketplaces.get(name);
+    const current = remoteMarketplaces.get(name);
+    if (next !== undefined && current === undefined) {
+      changes.push({
+        kind: "marketplace",
+        action: "add",
+        target: name,
+        summary: `Add marketplace ${name} to the preset`,
+        risk: "configuration",
+      });
+    } else if (next === undefined && current !== undefined) {
+      changes.push({
+        kind: "marketplace",
+        action: "remove",
+        target: name,
+        summary: `Remove marketplace ${name} from the preset`,
+        risk: "configuration",
+      });
+    } else if (next !== undefined && current !== undefined && next.source !== current.source) {
+      changes.push({
+        kind: "marketplace",
+        action: "update",
+        target: name,
+        summary: `Update marketplace ${name} source in the preset`,
+        risk: "configuration",
+      });
+    }
+  }
+
+  const localPlugins = new Map(local.plugins.map((entry) => [entry.id, entry]));
+  const remotePlugins = new Map(remote.plugins.map((entry) => [entry.id, entry]));
+  for (const id of sortedKeys(localPlugins, remotePlugins)) {
+    const next = localPlugins.get(id);
+    const current = remotePlugins.get(id);
+    if (next !== undefined && current === undefined) {
+      changes.push({
+        kind: "plugin-install",
+        action: "add",
+        target: id,
+        summary: `Add plugin ${id} to the preset`,
+        risk: "full-trust",
+      });
+      continue;
+    }
+    if (next === undefined && current !== undefined) {
+      changes.push({
+        kind: "plugin-install",
+        action: "remove",
+        target: id,
+        summary: `Remove plugin ${id} from the preset`,
+        risk: "configuration",
+      });
+      continue;
+    }
+    if (next === undefined || current === undefined) continue;
+    if (next.install !== current.install) {
+      changes.push({
+        kind: "plugin-install",
+        action: "update",
+        target: id,
+        summary: `Update plugin ${id} source in the preset`,
+        risk: "full-trust",
+      });
+    }
+    if (next.enabled !== current.enabled) {
+      changes.push({
+        kind: "plugin-state",
+        action: next.enabled ? "enable" : "disable",
+        target: id,
+        summary: `Record plugin ${id} as ${next.enabled ? "enabled" : "disabled"}`,
+        risk: "configuration",
+      });
+    }
+  }
+
+  const localSettings = new Map(
+    local.pluginSettings.map((entry) => [
+      `${entry.id}\u0000${entry.key}`,
+      entry,
+    ]),
+  );
+  const remoteSettings = new Map(
+    remote.pluginSettings.map((entry) => [
+      `${entry.id}\u0000${entry.key}`,
+      entry,
+    ]),
+  );
+  const changedSettingsByPlugin = new Map<string, number>();
+  for (const key of sortedKeys(localSettings, remoteSettings)) {
+    const next = localSettings.get(key);
+    const current = remoteSettings.get(key);
+    if (!sameJson(next?.value, current?.value)) {
+      const pluginId = (next ?? current)?.id;
+      if (pluginId !== undefined) {
+        changedSettingsByPlugin.set(
+          pluginId,
+          (changedSettingsByPlugin.get(pluginId) ?? 0) + 1,
+        );
+      }
+    }
+  }
+  for (const [pluginId, count] of [...changedSettingsByPlugin].sort(
+    ([left], [right]) => left.localeCompare(right),
+  )) {
+    changes.push({
+      kind: "plugin-settings",
+      action: "update",
+      target: pluginId,
+      summary: `Update ${count} captured ${plural(count, "setting", "settings")} for ${pluginId}`,
+      risk: "configuration",
+    });
+  }
+
+  if (!sameJson(local.settings.generalSettings, remote.settings.generalSettings)) {
+    changes.push({
+      kind: "general-settings",
+      action: "update",
+      target: "BB general settings",
+      summary: "Update BB general settings in the preset",
+      risk: "configuration",
+    });
+  }
+  if (!sameJson(local.settings.experiments, remote.settings.experiments)) {
+    changes.push({
+      kind: "experiments",
+      action: "update",
+      target: "BB experiments",
+      summary: "Update BB experiment flags in the preset",
+      risk: "configuration",
+    });
+  }
+  if (!sameJson(local.settings.keybindingOverrides, remote.settings.keybindingOverrides)) {
+    changes.push({
+      kind: "keybindings",
+      action: "update",
+      target: "Keyboard shortcuts",
+      summary: "Update keyboard shortcut overrides in the preset",
+      risk: "configuration",
+    });
+  }
+  if (!sameJson(local.settings.appearance, remote.settings.appearance)) {
+    changes.push({
+      kind: "appearance",
+      action: "update",
+      target: "Theme",
+      summary: `Record theme ${local.settings.appearance.themeId} in the preset`,
+      risk: "configuration",
+    });
+  }
+  if (local.bbVersion !== remote.bbVersion) {
+    changes.push({
+      kind: "metadata",
+      action: "update",
+      target: "BB version",
+      summary: `Record BB ${local.bbVersion} in preset metadata`,
+      risk: "configuration",
+    });
+  }
+
+  return changes.map((change) => planChangeSchema.parse(change));
 }
 
 export function errorMessage(cause: unknown): string {
