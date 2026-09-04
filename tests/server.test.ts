@@ -122,6 +122,7 @@ describe("plugin registration", () => {
         /^class-variance-authority$/,
         /^clsx$/,
         /^tailwind-merge$/,
+        /^@testing-library\/react$/,
         /^vitest(?:\/.*)?$/,
       ],
     });

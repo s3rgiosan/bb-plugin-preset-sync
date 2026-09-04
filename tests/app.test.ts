@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
+import { waitFor } from "@testing-library/react";
 import type { SyncStatus } from "../lib/preset";
 
 describe("plugin app registration", () => {
@@ -81,5 +82,63 @@ describe("plugin app registration", () => {
     expect(slot.getByRole("button", { name: /Pull remote/i })).toBeTruthy();
     expect(slot.getByRole("button", { name: /Push local/i })).toBeTruthy();
     slot.lifecycle.unmount();
+
+    const accessory = app.navPanels[0]?.experimental_sidebarAccessory;
+    if (accessory === undefined) throw new Error("Sidebar accessory is missing");
+    const indicator = renderSlot(
+      { component: accessory },
+      {},
+      {
+        settings: { repositoryUrl: status.repository },
+        rpc: {
+          sync_cached_check: () => ({
+            checkedAt: status.checkedAt,
+            status,
+            error: null,
+          }),
+        },
+      },
+    );
+    expect(await indicator.findByText("↓1 ↑1")).toBeTruthy();
+    indicator.lifecycle.unmount();
+  });
+
+  it("renders no sidebar indicator while both sides match", async () => {
+    const app = await loadPluginApp(() => import("../app"));
+    const accessory = app.navPanels[0]?.experimental_sidebarAccessory;
+    if (accessory === undefined) throw new Error("Sidebar accessory is missing");
+    const repository = "https://github.com/example/preset.git";
+    const indicator = renderSlot(
+      { component: accessory },
+      {},
+      {
+        settings: { repositoryUrl: repository },
+        rpc: {
+          sync_cached_check: () => ({
+            checkedAt: "2026-09-04T08:00:00.000Z",
+            status: {
+              checkedAt: "2026-09-04T08:00:00.000Z",
+              repository,
+              branch: "main",
+              remoteHead: "0123456789abcdef",
+              remoteCapturedAt: "2026-09-04T07:00:00.000Z",
+              localCapturedAt: "2026-09-04T08:00:00.000Z",
+              stagedAt: null,
+              changeCount: 0,
+              pushChangeCount: 0,
+              pullChanges: [],
+              pushChanges: [],
+              warnings: [],
+              lastOperation: null,
+            },
+            error: null,
+          }),
+        },
+      },
+    );
+
+    await waitFor(() => expect(indicator.inspection.rpcCalls).toHaveLength(1));
+    expect(indicator.container.textContent).toBe("");
+    indicator.lifecycle.unmount();
   });
 });
