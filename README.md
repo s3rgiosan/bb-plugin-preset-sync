@@ -9,7 +9,7 @@ section under **Settings → Plugins → Preset Sync**, and the `bb preset` comm
 From the y5k marketplace:
 
 ```bash
-bb marketplace add git:https://github.com/imyeskela/bb-marketplace.git@main
+bb marketplace add git:https://github.com/imyeskela/y5k-bb-marketplace.git@main
 bb plugin install preset-sync@y5k --yes
 ```
 
