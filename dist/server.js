@@ -18915,14 +18915,14 @@ var settingsPresetSchema = external_exports.object({
     showUnhandledProviderEvents: external_exports.boolean(),
     steerActiveThreadOnEnter: external_exports.boolean(),
     streamerMode: external_exports.boolean()
-  }).strict(),
+  }).loose(),
   experiments: external_exports.record(external_exports.string(), external_exports.boolean()),
   keybindingOverrides: external_exports.array(keybindingOverrideSchema),
   appearance: external_exports.object({
     themeId: external_exports.string().min(1),
     faviconColor: faviconColorSchema
-  }).strict()
-}).strict();
+  }).loose()
+}).loose();
 var pluginPresetEntrySchema = external_exports.object({
   id: external_exports.string().min(1),
   install: external_exports.string().min(1),

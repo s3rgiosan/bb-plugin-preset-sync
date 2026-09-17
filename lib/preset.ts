@@ -35,6 +35,9 @@ const keybindingOverrideSchema = z
   })
   .strict();
 
+// bb's settings shapes grow between releases, so the settings subtree keeps
+// unknown keys instead of rejecting them; the preset structures below stay
+// strict to catch corruption in the plugin's own files.
 export const settingsPresetSchema = z
   .object({
     generalSettings: z
@@ -46,7 +49,7 @@ export const settingsPresetSchema = z
         steerActiveThreadOnEnter: z.boolean(),
         streamerMode: z.boolean(),
       })
-      .strict(),
+      .loose(),
     experiments: z.record(z.string(), z.boolean()),
     keybindingOverrides: z.array(keybindingOverrideSchema),
     appearance: z
@@ -54,9 +57,9 @@ export const settingsPresetSchema = z
         themeId: z.string().min(1),
         faviconColor: faviconColorSchema,
       })
-      .strict(),
+      .loose(),
   })
-  .strict();
+  .loose();
 
 export const pluginPresetEntrySchema = z
   .object({

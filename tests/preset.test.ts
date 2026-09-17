@@ -10,6 +10,7 @@ import {
   parseCatalogInstallSource,
   readPresetSnapshot,
   samePresetConfiguration,
+  settingsPresetSchema,
   writePresetSnapshot,
   settingSafetyIssue,
   type PresetSnapshot,
@@ -197,5 +198,30 @@ describe("preset safety", () => {
     await expect(readPresetSnapshot(directory)).rejects.toThrow(
       "Preset path must not be a symbolic link: preset/settings.json",
     );
+  });
+});
+
+describe("settings schema forward compatibility", () => {
+  it("keeps generalSettings keys added by newer bb releases", () => {
+    const result = settingsPresetSchema.safeParse({
+      generalSettings: {
+        defaultProviderId: null,
+        providerOrder: [],
+        showKeyboardHints: true,
+        showUnhandledProviderEvents: false,
+        steerActiveThreadOnEnter: true,
+        streamerMode: false,
+        showDiagnosticEvents: false,
+        managedBranchPrefix: "bb/",
+        machineServerUrl: null,
+        machineGitCredentialsEnabled: true,
+        defaultMachineAccess: null,
+      },
+      experiments: {},
+      keybindingOverrides: [],
+      appearance: { themeId: "default", faviconColor: "default" },
+    });
+
+    expect(result.success).toBe(true);
   });
 });
